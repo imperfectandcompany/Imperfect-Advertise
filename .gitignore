@@ -1,0 +1,70 @@
+# OS-generated files #
+#######################
+*.DS_Store
+*.swp
+*.swo
+Thumbs.db
+
+# Rider / JetBrains #
+#####################
+.idea/
+*.sln.iml
+*.dotSettings.user
+*.dotTrace
+
+# Visual Studio / Common .NET ignores #
+#######################################
+.vs/
+*.user
+*.suo
+*.userprefs
+*.VC.db
+*.VC.VC.opendb
+*.pdb
+*.mdb
+*.opendb
+
+# Build and intermediate output #
+#################################
+bin/
+obj/
+Debug/
+Release/
+TestResults/
+
+# NuGet Packages #
+##################
+*.nupkg
+*.snupkg
+packages/
+packages.config
+
+# Log / Crash / Coverage files #
+###############################
+*.log
+*.error.log
+*.report.xml
+coverage/
+TestResult.xml
+TestResult.trx
+*.gcov
+*.coverlet.*
+*.coverage
+
+# Resharper / StyleCop
+######################
+_ReSharper.*
+*resharper*
+stylecop.xml
+
+# Additional Optional Ignores #
+###############################
+*.local.json    # if you have local config
+.env            # environment variables
+obj/project.packagespec.json
+obj/rider.project.model.nuget.info
+obj/rider.project.restore.info
+obj/project.assets.json
+obj/project.nuget.cache
+obj/Debug/net8.0/Imperfect-Advertise.AssemblyInfo.cs
+obj/Debug/net8.0/Imperfect-Advertise.AssemblyInfoInputs.cache

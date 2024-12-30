@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "9gMy1lmArLQ=",
+  "dgSpecHash": "zkCQxKtSwao=",
   "success": true,
-  "projectFilePath": "/Users/dijaz/Documents/Coding/GitHub/Imperfect-Advertise/Imperfect-Advertise.csproj",
+  "projectFilePath": "/Users/dijaz/Documents/Coding/GitHub/ImperfectAdvertise/ImperfectAdvertise.csproj",
   "expectedPackageFiles": [
     "/Users/dijaz/.nuget/packages/counterstrikesharp.api/1.0.296/counterstrikesharp.api.1.0.296.nupkg.sha512",
     "/Users/dijaz/.nuget/packages/maxmind.db/4.1.0/maxmind.db.4.1.0.nupkg.sha512",

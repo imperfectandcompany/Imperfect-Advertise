@@ -2606,11 +2606,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "/Users/dijaz/Documents/Coding/GitHub/Imperfect-Advertise/Imperfect-Advertise.csproj",
-      "projectName": "Imperfect-Advertise",
-      "projectPath": "/Users/dijaz/Documents/Coding/GitHub/Imperfect-Advertise/Imperfect-Advertise.csproj",
+      "projectUniqueName": "/Users/dijaz/Documents/Coding/GitHub/ImperfectAdvertise/ImperfectAdvertise.csproj",
+      "projectName": "ImperfectAdvertise",
+      "projectPath": "/Users/dijaz/Documents/Coding/GitHub/ImperfectAdvertise/ImperfectAdvertise.csproj",
       "packagesPath": "/Users/dijaz/.nuget/packages/",
-      "outputPath": "/Users/dijaz/Documents/Coding/GitHub/Imperfect-Advertise/obj/",
+      "outputPath": "/Users/dijaz/Documents/Coding/GitHub/ImperfectAdvertise/obj/",
       "projectStyle": "PackageReference",
       "configFilePaths": [
         "/Users/dijaz/.nuget/NuGet/NuGet.Config"

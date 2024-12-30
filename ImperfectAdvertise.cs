@@ -1,15 +1,11 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Net;
+﻿using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Attributes.Registration;
-using CounterStrikeSharp.API.Modules.Admin;
+using CounterStrikeSharp.API.Core.Translations;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Entities;
@@ -18,57 +14,142 @@ using CounterStrikeSharp.API.Modules.Utils;
 using MaxMind.GeoIP2;
 using Timer = CounterStrikeSharp.API.Modules.Timers.Timer;
 
-namespace Imperfect_Advertise
+namespace ImperfectAdvertise
 {
     /// <summary>
-    /// Main plugin class implementing IPluginConfig&lt;Config&gt;.
+    /// Main plugin class implementing IPluginConfig for ImperfectAdvertisements.
+    /// Supports optional ConVar overrides for IP, server name, and sub-name.
+    ///
+    /// If no config is found, we generate a user-friendly default config with
+    /// some comment/documentation lines to help the user. That file is placed in:
+    ///   configs/plugins/ImperfectAdvertise/ImperfectAdvertise.json
+    ///
+    /// Known placeholders in messages:
+    ///   {SERVERNAME}, {SERVERSUBNAME}, {PLAYERNAME}, {MAP}, {TIME}, {DATE}, {IP}, {PORT},
+    ///   {MAXPLAYERS}, {PLAYERS}, plus multi-language tags (like {map_name}).
+    ///
+    /// Colors: embed placeholders like {BLUE}, {RED}, {GREEN}, etc.
     /// </summary>
-    public partial class Ads : BasePlugin, IPluginConfig<Config>
+    public class ImperfectAdvertise : BasePlugin, IPluginConfig<Config>
     {
-        public override string ModuleAuthor => "thesamefabius (refactored by Imperfect style)";
-        public override string ModuleName => "Imperfect-Advertisements";
-        public override string ModuleVersion => "1.0.9";
-
         /// <summary>
-        /// Holds the plugin's runtime config once parsed.
+        /// Our plugin config after OnConfigParsed.
         /// </summary>
-        public Config Config { get; set; } = null!;
+        public Config Config { get; set; } = new();
 
-        /// <summary>
-        /// Example: A FakeConVar to let users override the IP logic at runtime.
-        /// e.g.: +imperfect_ads_ip "123.45.67.8"
-        /// </summary>
-        public FakeConVar<string> ImperfectAdsIp = new(
+        // Make sure the ModuleName (ImperfectAdvertise) matches the folder name
+        public override string ModuleAuthor   => "Imperfect and Company LLC";
+        public override string ModuleName     => "ImperfectAdvertise";
+        public override string ModuleVersion  => "1.0.3";
+
+        // ConVar overrides for IP / server name / sub-name
+        private readonly FakeConVar<string> _imperfectAdsIp = new(
             "imperfect_ads_ip",
-            "Specifies an IP override for the advertisements plugin",
-            "",
-            ConVarFlags.FCVAR_NONE
+            "Specifies an IP override for ImperfectAdvertise plugin.",
+            ""
+        );
+
+        private readonly FakeConVar<string> _imperfectAdsServerName = new(
+            "imperfect_ads_servername",
+            "Specifies a server name override for ImperfectAdvertise plugin.",
+            ""
+        );
+
+        private readonly FakeConVar<string> _imperfectAdsServerSubName = new(
+            "imperfect_ads_serversubname",
+            "Specifies a server sub-name override for ImperfectAdvertise plugin.",
+            ""
         );
 
         /// <summary>
-        /// Per-player data. (Index = player slot)
+        /// Track ephemeral data (center HTML states, etc.) for up to 66 player slots.
         /// </summary>
         private readonly User?[] _users = new User?[66];
 
+        /// <summary>
+        /// Timers for rotating ads. We'll kill them on unload or if config changes.
+        /// </summary>
         private readonly List<Timer> _timers = new();
+
+        /// <summary>
+        /// For multi-language usage: maps SteamID64 => player ISO code.
+        /// </summary>
         private readonly Dictionary<ulong, string> _playerIsoCode = new();
 
+        // Flag to prevent multiple default-config attempts
+        private static bool _staticConfigCreated;
+
+        #region Static Constructor (Preempt Engine Stub)
+
+        /// <summary>
+        /// Runs when .NET runtime loads this type, typically before plugin Load() or OnConfigParsed().
+        /// We attempt to create our real config file early, preventing the engine from generating a stub.
+        /// </summary>
+        static ImperfectAdvertise()
+        {
+            try
+            {
+                if (!_staticConfigCreated)
+                {
+                    string appRoot = Application.RootDirectory; 
+                    var dir = Path.Combine(appRoot, "configs/plugins/ImperfectAdvertise");
+                    Directory.CreateDirectory(dir);
+
+                    var path = Path.Combine(dir, "ImperfectAdvertise.json");
+                    if (!File.Exists(path) || new FileInfo(path).Length < 50)
+                    {
+                        var defaultCfg = MakeConfig();
+                        var docObject  = BuildDocObject(defaultCfg);
+
+                        var text = JsonSerializer.Serialize(docObject, new JsonSerializerOptions
+                        {
+                            WriteIndented = true,
+                            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+                        });
+
+                        File.WriteAllText(path, text);
+                        Console.WriteLine("[ImperfectAdvertise] (static) Created default config at " + path);
+                    }
+                    else
+                    {
+                        Console.WriteLine("[ImperfectAdvertise] (static) Found existing ImperfectAdvertise.json, skipping default creation.");
+                    }
+
+                    _staticConfigCreated = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ImperfectAdvertise] (static) Unable to create default config => {ex}");
+            }
+        }
+
+        #endregion
+
+        /// <summary>
+        /// Plugin lifecycle: OnLoad.
+        /// </summary>
         public override void Load(bool hotReload)
         {
-            // Register the FakeConVar so the engine sees it (and can set it from command line or server cfg).
+            // Double-check our default config in case static constructor didn't run
+            EnsureDefaultConfigExists();
+
+            // Register FakeConVars
             RegisterFakeConVars(GetType());
 
-            // Hook up events
-            RegisterEventHandler<EventPlayerConnectFull>(EventPlayerConnectFull);
-            RegisterEventHandler<EventPlayerDisconnect>(EventPlayerDisconnect);
+            // Hook relevant events
+            RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
+            RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
             RegisterListener<Listeners.OnClientAuthorized>(OnClientAuthorized);
             RegisterListener<Listeners.OnTick>(OnTick);
 
-            // Start timers if config was already loaded. If OnConfigParsed not yet called, no big deal—will re-init if needed.
-            if (Config?.Ads != null)
+            // If config already has Ads, start them
+            if (Config.Ads != null)
+            {
                 StartTimers();
+            }
 
-            // On hot reload, re-initialize the _users array for connected players
+            // If hot reload, re-init ephemeral data for connected players
             if (hotReload)
             {
                 foreach (var player in Utilities.GetPlayers())
@@ -78,37 +159,9 @@ namespace Imperfect_Advertise
             }
         }
 
-        /// <summary>
-        /// Called by the CounterStrikeSharp framework once the config is parsed.
-        /// This is where we finalize (or override) the plugin config logic.
-        /// </summary>
-        public void OnConfigParsed(Config config)
-        {
-            // Store the config
-            Config = config;
-
-            // If our new ConVar is set, we can override something in config if needed.
-            string overrideIp = ImperfectAdsIp.Value?.Trim() ?? "";
-            if (!string.IsNullOrEmpty(overrideIp))
-            {
-                // e.g. if your plugin needed to store an IP in Config, we do:
-                // Config.SomeIp = overrideIp;
-                // or just store it in a field
-                Console.WriteLine($"[Imperfect-Advertisements] Overriding IP with: {overrideIp}");
-            }
-
-            // If the plugin is already loaded and timers are running, let's kill & re-start them
-            foreach (var t in _timers) t.Kill();
-            _timers.Clear();
-
-            // Start again
-            if (Config.Ads != null)
-                StartTimers();
-        }
-
         public override void Unload(bool hotReload)
         {
-            // Kill timers
+            // Stop any running timers
             foreach (var t in _timers)
                 t.Kill();
             _timers.Clear();
@@ -116,67 +169,110 @@ namespace Imperfect_Advertise
             base.Unload(hotReload);
         }
 
-        private HookResult EventPlayerDisconnect(EventPlayerDisconnect ev, GameEventInfo info)
+        /// <summary>
+        /// Called after config is parsed by the engine. We apply overrides, then re-init timers.
+        /// </summary>
+        public void OnConfigParsed(Config config)
         {
-            if (Config.LanguageMessages == null) return HookResult.Continue;
-            var player = ev.Userid;
-            if (player is null) return HookResult.Continue;
+            Config = config;
 
-            _playerIsoCode.Remove(player.SteamID);
-            return HookResult.Continue;
-        }
-
-        private void OnClientAuthorized(int slot, SteamID id)
-        {
-            var player = Utilities.GetPlayerFromSlot(slot);
-            _users[slot] = new User();
-
-            if (Config.LanguageMessages == null) return;
-
-            if (player?.IpAddress != null)
+            // ConVar overrides
+            var overrideIp = _imperfectAdsIp.Value?.Trim() ?? "";
+            if (!string.IsNullOrEmpty(overrideIp))
             {
-                var ipOnly = player.IpAddress.Split(':')[0];
-                _playerIsoCode.TryAdd(id.SteamId64, GetPlayerIsoCode(ipOnly));
+                Console.WriteLine($"[ImperfectAdvertise] Overriding IP with: {overrideIp}");
             }
+
+            var overrideName = _imperfectAdsServerName.Value?.Trim() ?? "";
+            if (!string.IsNullOrEmpty(overrideName))
+            {
+                Console.WriteLine($"[ImperfectAdvertise] Overriding ServerName with: {overrideName}");
+                Config.ServerName = overrideName;
+            }
+
+            var overrideSub = _imperfectAdsServerSubName.Value?.Trim() ?? "";
+            if (!string.IsNullOrEmpty(overrideSub))
+            {
+                Console.WriteLine($"[ImperfectAdvertise] Overriding ServerSubName with: {overrideSub}");
+                Config.ServerSubName = overrideSub;
+            }
+
+            // Re-init timers with new intervals or new messages
+            foreach (var t in _timers)
+                t.Kill();
+            _timers.Clear();
+
+            if (Config.Ads != null)
+                StartTimers();
         }
 
-        private HookResult EventPlayerConnectFull(EventPlayerConnectFull ev, GameEventInfo info)
-        {
-            if (Config.WelcomeMessage == null) return HookResult.Continue;
+        #region EVENT HANDLERS
 
+        private HookResult OnPlayerConnectFull(EventPlayerConnectFull ev, GameEventInfo info)
+        {
             var player = ev.Userid;
-            if (player is null || !player.IsValid || player.SteamID == null)
+            if (player == null || !player.IsValid)
                 return HookResult.Continue;
 
-            var welcomeMsg = Config.WelcomeMessage;
-            var msg = welcomeMsg.Message
+            // If there's a welcome message
+            var welcome = Config.WelcomeMessage;
+            if (welcome == null)
+                return HookResult.Continue;
+
+            var msg = welcome.Message
                 .Replace("{PLAYERNAME}", player.PlayerName)
                 .ReplaceColorTags();
 
-            PrintWrappedLine(0, msg, player, isWelcome: true);
+            PrintWrappedLine(0, msg, player, true);
             return HookResult.Continue;
         }
 
+        private HookResult OnPlayerDisconnect(EventPlayerDisconnect ev, GameEventInfo info)
+        {
+            // If multi-language is active, remove iso code entry
+            if (Config.LanguageMessages != null)
+            {
+                var p = ev.Userid;
+                if (p != null) _playerIsoCode.Remove(p.SteamID);
+            }
+            return HookResult.Continue;
+        }
+
+        private void OnClientAuthorized(int slot, SteamID steamId)
+        {
+            _users[slot] = new User();
+
+            if (Config.LanguageMessages == null)
+                return;
+
+            var player = Utilities.GetPlayerFromSlot(slot);
+            if (player?.IpAddress != null)
+            {
+                var ipOnly = player.IpAddress.Split(':')[0];
+                _playerIsoCode[steamId.SteamId64] = GetPlayerIsoCode(ipOnly);
+            }
+        }
+
+        /// <summary>
+        /// OnTick: Update center HTML messages if they're active, until they expire.
+        /// </summary>
         private void OnTick()
         {
             foreach (var player in Utilities.GetPlayers())
             {
                 var user = _users[player.Slot];
-                if (user == null) continue;
-                if (!user.HtmlPrint) continue;
-
-                bool showWhenDead = Config.ShowHtmlWhenDead ?? false;
-                bool playerIsDead = !player.PawnIsAlive;
-
-                // If we only want to show while alive, skip if they're dead.
-                // If showWhenDead is true, we allow it to continue while they're dead.
-                if (!showWhenDead && playerIsDead)
+                if (user == null || !user.HtmlPrint)
                     continue;
 
-                var duration = Config.HtmlCenterDuration ?? 0f;
-                double allowedSeconds = duration;
+                bool showWhenDead = Config.ShowHtmlWhenDead ?? false;
+                if (!showWhenDead && !player.PawnIsAlive)
+                    continue;
 
-                if (TimeSpan.FromSeconds(user.PrintTime / 64.0).TotalSeconds < allowedSeconds)
+                float durationSec = Config.HtmlCenterDuration ?? 0f;
+                double currentTime = user.PrintTime / 64.0;
+
+                // If they're still within the time limit, reprint HTML
+                if (currentTime < durationSec)
                 {
                     player.PrintToCenterHtml(user.Message);
                     user.PrintTime++;
@@ -188,82 +284,182 @@ namespace Imperfect_Advertise
             }
         }
 
-        private void ShowAd(Advertisement ad)
+        #endregion
+
+        #region HELPER - Default Config
+
+        /// <summary>
+        /// Double-check in OnLoad, in case static constructor was skipped or delayed.
+        /// </summary>
+        private void EnsureDefaultConfigExists()
         {
-            var messages = ad.NextMessages;
-            foreach (var (type, message) in messages)
+            if (_staticConfigCreated) return;
+
+            string appRoot = Application.RootDirectory;
+            var dir = Path.Combine(appRoot, "configs/plugins/ImperfectAdvertise");
+            Directory.CreateDirectory(dir);
+
+            var path = Path.Combine(dir, "ImperfectAdvertise.json");
+            if (!File.Exists(path) || new FileInfo(path).Length < 50)
             {
-                switch (type)
-                {
-                    case "Chat":
-                        PrintWrappedLine(HudDestination.Chat, message);
-                        break;
-                    case "Center":
-                        PrintWrappedLine(HudDestination.Center, message);
-                        break;
-                }
+                CreateDefaultConfig(path);
+                Console.WriteLine("[ImperfectAdvertise] (Load) Re-created default config at " + path);
             }
+            else
+            {
+                Console.WriteLine("[ImperfectAdvertise] (Load) Found ImperfectAdvertise.json, no need to re-create.");
+            }
+
+            _staticConfigCreated = true;
         }
+
+        private static Config MakeConfig()
+        {
+            return new Config
+            {
+                PrintToCenterHtml = false,
+                WelcomeMessage = new WelcomeMessage
+                {
+                    MessageType  = MessageType.Chat,
+                    Message      = "Welcome to {SERVERNAME} | {SERVERSUBNAME}, {BLUE}{PLAYERNAME}!",
+                    DisplayDelay = 5
+                },
+                Ads = new List<Advertisement>
+                {
+                    new Advertisement
+                    {
+                        Interval = 60f,
+                        Messages = new List<Dictionary<string, string>>
+                        {
+                            new()
+                            {
+                                ["Chat"]   = "Try out {SERVERSUBNAME} - currently on {MAP}",
+                                ["Center"] = "Thanks for playing on {SERVERNAME}!"
+                            }
+                        }
+                    }
+                },
+                ServerName   = "ImperfectGamers",
+                ServerSubName= "24/7 Surf Easy",
+                DefaultLang  = "US",
+                LanguageMessages = new Dictionary<string, Dictionary<string, string>>
+                {
+                    {
+                        "map_name", new Dictionary<string, string>
+                        {
+                            ["US"] = "Map is {MAP}!"
+                        }
+                    }
+                },
+                MapsName = new Dictionary<string, string>
+                {
+                    ["surf_kitsune"] = "Surf Kitsune"
+                },
+                Version = 1
+            };
+        }
+
+        private static Dictionary<string, object?> BuildDocObject(Config cfg)
+        {
+            return new Dictionary<string, object?>
+            {
+                ["_comment"] = new []
+                {
+                    "This is the default ImperfectAdvertise config.",
+                    "Feel free to modify these settings, or override them with ConVars in your startup.",
+                    "Use 'css_advert_reload' console command to reload after editing."
+                },
+                ["print_to_center_html"] = cfg.PrintToCenterHtml,
+                ["html_center_duration"] = cfg.HtmlCenterDuration,
+                ["show_html_when_dead"]  = cfg.ShowHtmlWhenDead,
+                ["welcome_message"]      = cfg.WelcomeMessage,
+                ["ads"]                  = cfg.Ads,
+                ["server_name"]          = cfg.ServerName,
+                ["server_subname"]       = cfg.ServerSubName,
+                ["default_lang"]         = cfg.DefaultLang,
+                ["language_messages"]    = cfg.LanguageMessages,
+                ["maps_name"]            = cfg.MapsName,
+                ["Version"]              = cfg.Version
+            };
+        }
+
+        private Config CreateDefaultConfig(string filePath)
+        {
+            var defaultCfg = MakeConfig();
+            var docObject  = BuildDocObject(defaultCfg);
+
+            var text = JsonSerializer.Serialize(docObject, new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+            });
+
+            File.WriteAllText(filePath, text);
+            Console.WriteLine("[ImperfectAdvertise] Created default config at " + filePath);
+
+            return defaultCfg;
+        }
+
+        #endregion
+
+        #region ADS/TIMERS
 
         private void StartTimers()
         {
-            if (Config.Ads == null) return;
+            if (Config.Ads == null)
+                return;
+
             foreach (var ad in Config.Ads)
             {
                 _timers.Add(AddTimer(ad.Interval, () => ShowAd(ad), TimerFlags.REPEAT));
             }
         }
 
-        [ConsoleCommand("css_advert_reload", "Reload advertisement config")]
-        public void ReloadAdvertConfig(CCSPlayerController? controller, CommandInfo command)
+        private void ShowAd(Advertisement ad)
         {
-            // In Imperfect style, typically the engine calls OnConfigParsed() for you after a config parse,
-            // but if you still want a manual refresh, do it here:
-
-            // 1) Re-read the config from disk if you want
-            var newConfig = LoadConfigFromDisk();
-            // 2) Then manually call OnConfigParsed to re-init
-            OnConfigParsed(newConfig);
-
-            // [Optional] re-init any IP lookups
-            if (Config.LanguageMessages != null)
+            var messages = ad.NextMessages;
+            foreach (var (msgType, line) in messages)
             {
-                foreach (var player in Utilities.GetPlayers())
+                switch (msgType)
                 {
-                    if (player.IpAddress == null || player.AuthorizedSteamID == null) continue;
-                    var ipOnly = player.IpAddress.Split(':')[0];
-                    _playerIsoCode.TryAdd(player.AuthorizedSteamID.SteamId64, GetPlayerIsoCode(ipOnly));
+                    case "Chat":
+                        PrintWrappedLine(HudDestination.Chat, line);
+                        break;
+                    case "Center":
+                        PrintWrappedLine(HudDestination.Center, line);
+                        break;
                 }
             }
-
-            const string msg = "\x08[\x0C Advert \x08] config reloaded!";
-            if (controller == null)
-                Console.WriteLine(msg);
-            else
-                controller.PrintToChat(msg);
         }
 
+        /// <summary>
+        /// Prints either a single-player welcome or a broadcast ad. 
+        /// For multi-language placeholders, see ProcessMessage().
+        /// </summary>
         private void PrintWrappedLine(HudDestination? destination, string message,
             CCSPlayerController? connectPlayer = null, bool isWelcome = false)
         {
-            if (connectPlayer != null && !connectPlayer.IsBot && isWelcome)
+            if (isWelcome && connectPlayer != null && !connectPlayer.IsBot)
             {
-                var welcomeMessage = Config.WelcomeMessage;
-                if (welcomeMessage == null) return;
+                // Single-person welcome
+                var welcome = Config.WelcomeMessage;
+                if (welcome == null) return;
 
-                AddTimer(welcomeMessage.DisplayDelay, () =>
+                AddTimer(welcome.DisplayDelay, () =>
                 {
-                    if (connectPlayer == null || !connectPlayer.IsValid || connectPlayer.SteamID == null) return;
+                    if (!connectPlayer.IsValid)
+                        return;
+
                     var processed = ProcessMessage(message, connectPlayer.SteamID)
                         .Replace("{PLAYERNAME}", connectPlayer.PlayerName);
 
-                    switch (welcomeMessage.MessageType)
+                    switch (welcome.MessageType)
                     {
                         case MessageType.Chat:
                             connectPlayer.PrintToChat(processed);
                             break;
                         case MessageType.Center:
-                            connectPlayer.PrintToChat(processed);
+                            connectPlayer.PrintToCenter(processed);
                             break;
                         case MessageType.CenterHtml:
                             SetHtmlPrintSettings(connectPlayer, processed);
@@ -273,220 +469,249 @@ namespace Imperfect_Advertise
             }
             else
             {
-                // For normal ads
-                foreach (var player in Utilities.GetPlayers()
-                             .Where(u => !isWelcome && !u.IsBot && u.IsValid && u.SteamID != null))
+                // Broadcast to everyone else
+                var targets = Utilities.GetPlayers().Where(u => !u.IsBot && u.IsValid && !isWelcome);
+
+                foreach (var pl in targets)
                 {
-                    var processed = ProcessMessage(message, player.SteamID);
+                    var processed = ProcessMessage(message, pl.SteamID);
                     if (destination == HudDestination.Chat)
                     {
-                        player.PrintToChat($" {processed}");
+                        pl.PrintToChat($" {processed}");
                     }
                     else
                     {
                         if (Config.PrintToCenterHtml == true)
-                            SetHtmlPrintSettings(player, processed);
+                            SetHtmlPrintSettings(pl, processed);
                         else
-                            player.PrintToCenter(processed);
+                            pl.PrintToCenter(processed);
                     }
                 }
             }
         }
 
-        private void SetHtmlPrintSettings(CCSPlayerController player, string message)
+        private void SetHtmlPrintSettings(CCSPlayerController player, string processedMsg)
         {
-            var user = _users[player.Slot];
-            if (user == null)
-            {
-                _users[player.Slot] = new User { HtmlPrint = true, PrintTime = 0, Message = message };
-                return;
-            }
+            var user = _users[player.Slot] ?? new User();
+            _users[player.Slot] = user;
+
             user.HtmlPrint = true;
             user.PrintTime = 0;
-            user.Message = message;
+            user.Message   = processedMsg;
         }
 
         private string ProcessMessage(string message, ulong steamId)
         {
-            if (Config.LanguageMessages == null)
-                return ReplaceMessageTags(message);
-
-            var matches = Regex.Matches(message, @"\{([^}]*)\}");
-            foreach (Match match in matches)
+            // If multi-language is in use, parse placeholders first
+            if (Config.LanguageMessages != null)
             {
-                var tag = match.Groups[0].Value;
-                var tagName = match.Groups[1].Value;
+                var matches = Regex.Matches(message, @"\{([^}]*)\}");
+                foreach (Match match in matches)
+                {
+                    var tag     = match.Groups[0].Value;   // e.g. {map_name}
+                    var tagName = match.Groups[1].Value;   // e.g. map_name
 
-                if (!Config.LanguageMessages.TryGetValue(tagName, out var language)) continue;
+                    if (!Config.LanguageMessages.TryGetValue(tagName, out var translations))
+                        continue;
 
-                var isoCode = _playerIsoCode.TryGetValue(steamId, out var playerCountryIso)
-                    ? playerCountryIso
-                    : Config.DefaultLang;
+                    var iso = _playerIsoCode.TryGetValue(steamId, out var code)
+                        ? code
+                        : Config.DefaultLang;
 
-                if (isoCode != null && language.TryGetValue(isoCode, out var tagReplacement))
-                    message = message.Replace(tag, tagReplacement);
-                else if (Config.DefaultLang != null &&
-                         language.TryGetValue(Config.DefaultLang, out var defaultReplacement))
-                    message = message.Replace(tag, defaultReplacement);
+                    if (iso != null && translations.TryGetValue(iso, out var localized))
+                    {
+                        message = message.Replace(tag, localized);
+                    }
+                    else if (Config.DefaultLang != null &&
+                             translations.TryGetValue(Config.DefaultLang, out var fallback))
+                    {
+                        message = message.Replace(tag, fallback);
+                    }
+                }
             }
 
+            // Then do standard replacements
             return ReplaceMessageTags(message);
         }
 
         private string ReplaceMessageTags(string message)
         {
-            var mapName = NativeAPI.GetMapName();
+            var mapName   = NativeAPI.GetMapName();
+            var sName     = Config.ServerName ?? "CS2Server";
+            var subName   = Config.ServerSubName ?? "";
+
             var replaced = message
                 .Replace("{MAP}", mapName)
                 .Replace("{TIME}", DateTime.Now.ToString("HH:mm:ss"))
                 .Replace("{DATE}", DateTime.Now.ToString("dd.MM.yyyy"))
-                .Replace("{SERVERNAME}", ConVar.Find("hostname")?.StringValue ?? "CS2Server")
+                .Replace("{SERVERNAME}", sName)
+                .Replace("{SERVERSUBNAME}", subName)
                 .Replace("{IP}", ConVar.Find("ip")?.StringValue ?? "127.0.0.1")
                 .Replace("{PORT}", ConVar.Find("hostport")?.GetPrimitiveValue<int>().ToString() ?? "27015")
                 .Replace("{MAXPLAYERS}", Server.MaxPlayers.ToString())
-                .Replace("{PLAYERS}", Utilities.GetPlayers()
-                    .Count(u => u.PlayerPawn.Value != null && u.PlayerPawn.Value.IsValid).ToString())
-                .Replace("\n", "\u2029");
+                .Replace("{PLAYERS}", Utilities.GetPlayers().Count(u => u.PlayerPawn.Value is { IsValid: true }).ToString())
+                .Replace("\n", "\u2029")
+                .ReplaceColorTags();
 
-            replaced = replaced.ReplaceColorTags();
-
-            if (Config.MapsName != null && Config.MapsName.TryGetValue(mapName, out var customName))
+            // Map-specific rename if present
+            if (Config.MapsName != null && Config.MapsName.TryGetValue(mapName, out var friendly))
             {
-                replaced = replaced.Replace(mapName, customName);
+                replaced = replaced.Replace(mapName, friendly);
             }
 
             return replaced;
         }
 
-        private Config LoadConfigFromDisk()
-        {
-            // This is the function your “engine” calls to parse the plugin’s config from disk
-            // or create a default if missing. You might keep it private or protected. 
-            var directory = Path.Combine(Application.RootDirectory, "configs/plugins/Advertisement");
-            Directory.CreateDirectory(directory);
-
-            var configPath = Path.Combine(directory, "Advertisement.json");
-            if (!File.Exists(configPath))
-                return CreateConfig(configPath);
-
-            var jsonData = File.ReadAllText(configPath);
-            var opts = new JsonSerializerOptions { ReadCommentHandling = JsonCommentHandling.Skip };
-            var config = JsonSerializer.Deserialize<Config>(jsonData, opts);
-            return config ?? new Config();
-        }
-
-        private Config CreateConfig(string configPath)
-        {
-            var config = new Config
-            {
-                PrintToCenterHtml = false,
-                WelcomeMessage = new WelcomeMessage
-                {
-                    MessageType = MessageType.Chat,
-                    Message = "Welcome, {BLUE}{PLAYERNAME}",
-                    DisplayDelay = 5
-                },
-                Ads = new List<Advertisement>
-                {
-                    new Advertisement
-                    {
-                        Interval = 35,
-                        Messages = new List<Dictionary<string, string>>
-                        {
-                            new()
-                            {
-                                ["Chat"] = "{map_name}",
-                                ["Center"] = "Section 1 Center 1"
-                            },
-                            new()
-                            {
-                                ["Chat"] = "{current_time}"
-                            }
-                        }
-                    },
-                    new Advertisement
-                    {
-                        Interval = 40,
-                        Messages = new List<Dictionary<string, string>>
-                        {
-                            new()
-                            {
-                                ["Chat"] = "Section 2 Chat 1"
-                            },
-                            new()
-                            {
-                                ["Chat"] = "Section 2 Chat 2",
-                                ["Center"] = "Section 2 Center 1"
-                            }
-                        }
-                    }
-                },
-                DefaultLang = "US",
-                LanguageMessages = new Dictionary<string, Dictionary<string, string>>
-                {
-                    {
-                        "map_name", new Dictionary<string, string>
-                        {
-                            ["RU"] = "Текущая карта: {MAP}",
-                            ["US"] = "Current map: {MAP}",
-                            ["CN"] = "{GRAY}当前地图: {RED}{MAP}"
-                        }
-                    },
-                    {
-                        "current_time", new Dictionary<string, string>
-                        {
-                            ["RU"] = "{GRAY}Текущее время: {RED}{TIME}",
-                            ["US"] = "{GRAY}Current time: {RED}{TIME}",
-                            ["CN"] = "{GRAY}当前时间: {RED}{TIME}"
-                        }
-                    }
-                },
-                MapsName = new Dictionary<string, string>
-                {
-                    ["de_mirage"] = "Mirage",
-                    ["de_dust2"] = "Dust II"
-                }
-            };
-
-            var json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(configPath, json);
-
-            Console.WriteLine("[Advertisements] Created default config at: " + configPath);
-            return config;
-        }
-
         private string GetPlayerIsoCode(string ip)
         {
-            // e.g. use the convar override if you want (like ImperfectAdsIp).
-            // string overrideIp = ImperfectAdsIp.Value?.Trim();
-            // if (!string.IsNullOrEmpty(overrideIp)) { ip = overrideIp; } // just an example if you wanted
-
-            var defaultLang = Config.DefaultLang ?? "";
-            if (ip == "127.0.0.1") return defaultLang;
+            var def = Config.DefaultLang ?? "";
+            if (ip == "127.0.0.1")
+                return def;
 
             try
             {
-                var geoDbPath = Path.Combine(ModuleDirectory, "GeoLite2-Country.mmdb");
-                if (!File.Exists(geoDbPath))
-                    return defaultLang;
+                var path = Path.Combine(ModuleDirectory, "GeoLite2-Country.mmdb");
+                if (!File.Exists(path))
+                    return def;
 
-                using var reader = new DatabaseReader(geoDbPath);
+                using var reader = new DatabaseReader(path);
                 var response = reader.Country(IPAddress.Parse(ip));
-                return response.Country.IsoCode ?? defaultLang;
+                return response.Country.IsoCode ?? def;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"GeoIP2 Error: {ex}");
+                Console.WriteLine($"[ImperfectAdvertise] GeoIP2 error => {ex}");
+            }
+            return def;
+        }
+
+        #endregion
+
+        /// <summary>
+        /// Command to reload config from disk manually (engine normally does this automatically).
+        /// </summary>
+        [ConsoleCommand("css_advert_reload", "Reload ImperfectAdvert config")]
+        public void CommandReloadConfig(CCSPlayerController? controller, CommandInfo info)
+        {
+            EnsureDefaultConfigExists();
+
+            var newConfig = LoadConfigFromDisk();
+            OnConfigParsed(newConfig);
+
+            if (Config.LanguageMessages != null)
+            {
+                foreach (var pl in Utilities.GetPlayers())
+                {
+                    if (pl.IpAddress == null || pl.AuthorizedSteamID == null) continue;
+
+                    var ipOnly = pl.IpAddress.Split(':')[0];
+                    _playerIsoCode[pl.AuthorizedSteamID.SteamId64] = GetPlayerIsoCode(ipOnly);
+                }
             }
 
-            return defaultLang;
+            const string reloadMsg = "[ImperfectAdvertise] Config reloaded successfully!";
+            if (controller == null) Console.WriteLine(reloadMsg);
+            else controller.PrintToChat(reloadMsg);
+        }
+
+        private Config LoadConfigFromDisk()
+        {
+            string appRoot = Application.RootDirectory;
+            var dir = Path.Combine(appRoot, "configs/plugins/ImperfectAdvertise");
+            Directory.CreateDirectory(dir);
+
+            var path = Path.Combine(dir, "ImperfectAdvertise.json");
+            if (!File.Exists(path) || new FileInfo(path).Length < 50)
+            {
+                // If missing or basically empty, create defaults
+                return CreateDefaultConfig(path);
+            }
+
+            var json = File.ReadAllText(path);
+            var opts = new JsonSerializerOptions { ReadCommentHandling = JsonCommentHandling.Skip };
+            return JsonSerializer.Deserialize<Config>(json, opts) ?? new Config();
         }
     }
 
+    /// <summary>
+    /// Ephemeral data per user slot (HTML message state).
+    /// </summary>
     public class User
     {
-        public bool HtmlPrint { get; set; }
-        public string Message { get; set; } = string.Empty;
-        public int PrintTime { get; set; }
+        public bool   HtmlPrint { get; set; }
+        public string Message   { get; set; } = string.Empty;
+        public int    PrintTime { get; set; }
+    }
+
+    /// <summary>
+    /// Our plugin config, implementing IBasePluginConfig. 
+    /// </summary>
+    public class Config : IBasePluginConfig
+    {
+        [JsonPropertyName("print_to_center_html")]
+        public bool? PrintToCenterHtml   { get; init; }
+
+        [JsonPropertyName("html_center_duration")]
+        public float? HtmlCenterDuration { get; init; }
+
+        [JsonPropertyName("show_html_when_dead")]
+        public bool? ShowHtmlWhenDead    { get; set; }
+
+        [JsonPropertyName("welcome_message")]
+        public WelcomeMessage? WelcomeMessage { get; init; }
+
+        [JsonPropertyName("ads")]
+        public List<Advertisement>? Ads   { get; init; }
+
+        [JsonPropertyName("server_name")]
+        public string? ServerName { get; set; }
+
+        [JsonPropertyName("server_subname")]
+        public string? ServerSubName { get; set; }
+
+        [JsonPropertyName("default_lang")]
+        public string? DefaultLang   { get; init; }
+
+        [JsonPropertyName("language_messages")]
+        public Dictionary<string, Dictionary<string, string>>? LanguageMessages { get; init; }
+
+        [JsonPropertyName("maps_name")]
+        public Dictionary<string, string>? MapsName { get; init; }
+
+        public int Version { get; set; }
+    }
+
+    public enum MessageType
+    {
+        Chat       = 0,
+        Center     = 1,
+        CenterHtml = 2
+    }
+
+    /// <summary>
+    /// Single welcome message for newly connecting players.
+    /// </summary>
+    public class WelcomeMessage
+    {
+        public MessageType MessageType  { get; init; }
+        public required string Message  { get; init; }
+        public float DisplayDelay       { get; set; } = 2f;
+    }
+
+    /// <summary>
+    /// One repeating advertisement entry with an interval and multiple message lines.
+    /// </summary>
+    public class Advertisement
+    {
+        public float Interval { get; init; }
+
+        // e.g. "Chat": "...", "Center": "..."
+        public List<Dictionary<string, string>> Messages { get; init; } = new();
+
+        private int _currentIndex;
+
+        [JsonIgnore]
+        public Dictionary<string, string> NextMessages
+            => Messages[_currentIndex++ % Messages.Count];
     }
 }
